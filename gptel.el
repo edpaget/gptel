@@ -1704,6 +1704,22 @@ of type `gptel-tool':
 This variable is for internal use only, to define a tool use
 `gptel-make-tool'.")
 
+(defvar gptel--known-mcp-prompts nil
+  "Alist of MCP prompts arranged by server.
+
+Each entry maps an MCP server name to a list of prompt
+specifications provided by that server.  Each prompt spec is a
+plist containing at least :name and :description keys.
+
+This is used to track which MCP servers provide which prompts.
+
+Example structure:
+ ((\"server1\" . ((:name \"prompt1\" :description \"...\")
+                  (:name \"prompt2\" :description \"...\")))
+  (\"server2\" . ((:name \"prompt3\" :description \"...\"))))
+
+This variable is for internal use only.")
+
 (defun gptel-get-tool (path)
   "Find tool in gptel's tool registry at PATH.
 

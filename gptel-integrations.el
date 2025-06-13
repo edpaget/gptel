@@ -44,6 +44,8 @@
 (declare-function mcp-hub "mcp-hub")
 (declare-function mcp--status "mcp-hub")
 (declare-function mcp--tools "mcp-hub")
+(declare-function mcp--prompts "mcp-hub")
+(declare-function mcp-get-prompt "mcp-hub")
 (declare-function mcp-make-text-tool "mcp-hub")
 (defvar mcp-hub-servers)
 (defvar mcp-server-connections)
@@ -100,6 +102,8 @@ Call SERVER-CALLBACK after starting MCP servers."
                           (now-active (cl-remove-if-not server-active-p mcp-hub-servers)))
                       (mapc (lambda (tool) (apply #'gptel-make-tool tool)) tools)
                       (gptel-mcp--activate-tools tools)
+                      ;; Update known MCP prompts
+                      (gptel-mcp--update-known-prompts server-names)
                       (if-let* ((failed (cl-set-difference inactive-servers now-active
                                                            :test #'equal)))
                           (progn
@@ -121,6 +125,8 @@ Call SERVER-CALLBACK after starting MCP servers."
                  add-all-tools (mapcar #'car inactive-servers))
               (funcall add-all-tools (mapcar #'car servers))))
         (message "All MCP tools are already available to gptel!")
+        ;; Still update prompts even if tools are already available
+        (gptel-mcp--update-known-prompts)
         (when (functionp server-callback) (funcall server-callback))))))
 
 (defun gptel-mcp-disconnect (&optional servers interactive)
@@ -196,6 +202,42 @@ from all connected servers if it is nil."
                    tool-names))))
      server-names servers)))
 
+(defun gptel-mcp--get-prompts (&optional server-names)
+  "Return prompts from running MCP servers.
+
+SERVER-NAMES is a list of server names to get prompts from.  Get prompts
+from all connected servers if it is nil."
+  (unless server-names
+    (setq server-names (hash-table-keys mcp-server-connections)))
+  (let ((servers (mapcar (lambda (n) (gethash n mcp-server-connections))
+                         server-names)))
+    (cl-mapcan
+     (lambda (_name server)
+       (when (and server (equal (mcp--status server) 'connected))
+         (when-let* ((prompts (mcp--prompts server)))
+           (mapcar (lambda (prompt)
+                     (list :name (plist-get prompt :name)
+                           :description (plist-get prompt :description)))
+                   prompts))))
+     server-names servers)))
+
+(defun gptel-mcp--update-known-prompts (&optional server-names)
+  "Update `gptel--known-mcp-prompts' with prompts from MCP servers.
+
+SERVER-NAMES is a list of server names to update prompts for.  Update
+prompts from all connected servers if it is nil."
+  (unless server-names
+    (setq server-names (hash-table-keys mcp-server-connections)))
+  (dolist (server-name server-names)
+    (when-let* ((server (gethash server-name mcp-server-connections))
+                ((equal (mcp--status server) 'connected))
+                (prompts (mcp--prompts server)))
+      (setf (alist-get server-name gptel--known-mcp-prompts nil nil #'equal)
+            (mapcar (lambda (prompt)
+                      (list :name (plist-get prompt :name)
+                            :description (plist-get prompt :description)))
+                    prompts)))))
+
 (defun gptel-mcp--activate-tools (&optional tools)
   "Activate TOOLS or all MCP tools in current gptel session."
   (unless tools (setq tools (gptel-mcp--get-tools)))
@@ -256,11 +298,80 @@ from all connected servers if it is nil."
              finally do (plist-put state :tools valid-tools)
              (transient-setup 'gptel-tools nil nil :scope state)))
 
+  (transient-define-suffix gptel--suffix-mcp-prompts ()
+    "Manage MCP prompts."
+    :key "Mp"
+    :description "Manage MCP prompts"
+    :transient t
+    (interactive)
+    (gptel-mcp-prompts))
+
   (transient-remove-suffix 'gptel-tools '(0 2))
   (transient-append-suffix 'gptel-tools '(0 -1)
     [""
      (gptel--suffix-mcp-connect)
-     (gptel--suffix-mcp-disconnect)]))
+     (gptel--suffix-mcp-disconnect)
+     (gptel--suffix-mcp-prompts)]))
+
+(defun gptel-mcp-prompts ()
+  "Select and send MCP prompts via popup selection."
+  (interactive)
+  (if (null gptel--known-mcp-prompts)
+      (message "No MCP prompts available. Connect to MCP servers first.")
+    (let ((prompt-choices
+           (cl-loop for (server-name . prompts) in gptel--known-mcp-prompts
+                    append (mapcar (lambda (prompt)
+                                     (cons (format "%s: %s"
+                                                   server-name
+                                                   (plist-get prompt :name))
+                                           (cons server-name
+                                                 (plist-get prompt :name))))
+                                   prompts))))
+      (if (null prompt-choices)
+          (message "No MCP prompts available from connected servers.")
+        (let ((selection (completing-read
+                          "Select MCP prompt to send: "
+                          prompt-choices nil t)))
+          (when-let* ((choice (assoc selection prompt-choices))
+                      (server-name (cadr choice))
+                      (prompt-name (cddr choice)))
+            (gptel--mcp-send-prompt server-name prompt-name)))))))
+
+(defun gptel--mcp-prompt-description (server-name prompt-name)
+  "Get description for PROMPT-NAME from SERVER-NAME."
+  (when-let* ((server-prompts (alist-get server-name gptel--known-mcp-prompts nil nil #'equal))
+              (prompt-spec (cl-find-if (lambda (p) (equal (plist-get p :name) prompt-name))
+                                       server-prompts)))
+    (or (plist-get prompt-spec :description) "No description available")))
+
+(defun gptel--mcp-send-prompt (server-name prompt-name)
+  "Send MCP prompt PROMPT-NAME from SERVER-NAME using gptel-request."
+  (when-let* ((server (gethash server-name mcp-server-connections))
+              ((equal (mcp--status server) 'connected)))
+    (condition-case err
+        (let* ((prompt-data (mcp-get-prompt server prompt-name nil))
+               (prompt-text (when prompt-data
+                              (if-let* ((messages (plist-get prompt-data :messages))
+                                        (first-message (and (vectorp messages) (> (length messages) 0) (aref messages 0)))
+                                        (content (plist-get first-message :content)))
+                                  (if (stringp content)
+                                      content
+                                    (plist-get content :text))
+                                ;; Fallback: try to extract any text content
+                                (or (plist-get prompt-data :text)
+                                    (format "%s" prompt-data)))))
+               (gptel-buffer (or (cl-find-if (lambda (buf)
+                                               (with-current-buffer buf gptel-mode))
+                                             (buffer-list))
+                                 (current-buffer))))
+          (if prompt-text
+              (progn
+                (gptel-request prompt-text
+                  :buffer gptel-buffer
+                  :position (with-current-buffer gptel-buffer (point-max)))
+                (message "Sent MCP prompt: %s from %s" prompt-name server-name))
+            (message "Failed to get prompt %s from server %s" prompt-name server-name)))
+      (error (message "Error sending MCP prompt: %s" (error-message-string err))))))
 
 (provide 'gptel-integrations)
 ;;; gptel-integrations.el ends here
