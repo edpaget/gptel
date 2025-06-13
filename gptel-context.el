@@ -130,8 +130,8 @@ context chunk.  This is accessible as, for example:
    ;; A region is selected.
    ((use-region-p)
     (gptel-context--add-region (current-buffer)
-                                  (region-beginning)
-                                  (region-end))
+                               (region-beginning)
+                               (region-end))
     (deactivate-mark)
     (message "Current region added as context."))
    ;; If in dired
@@ -152,9 +152,9 @@ context chunk.  This is accessible as, for example:
          (gptel--model-capable-p 'media)
          (buffer-file-name))
     (funcall (if (and arg (< (prefix-numeric-value arg) 0))
-              #'gptel-context-remove
-              #'gptel-context-add-file)
-          (buffer-file-name)))
+                 #'gptel-context-remove
+               #'gptel-context-add-file)
+             (buffer-file-name)))
    ;; No region is selected, and ARG is positive.
    ((and arg (> (prefix-numeric-value arg) 0))
     (let* ((buffer-name (read-buffer "Choose buffer to add as context: "
@@ -246,7 +246,8 @@ PATH should be readable as text."
 
 If CONTEXT is nil, removes the context at point.
 If selection is active, removes all contexts within selection.
-If CONTEXT is a directory, recursively removes all files in it."
+If CONTEXT is a directory, recursively removes all files in it.
+If CONTEXT is an MCP resource, removes it from context."
   (cond
    ((overlayp context)
     (delete-overlay context)
@@ -256,11 +257,18 @@ If CONTEXT is a directory, recursively removes all files in it."
          for ov in (alist-get (current-buffer) gptel-context--alist)
          thereis (overlay-start ov))
       (setf (alist-get (current-buffer) gptel-context--alist nil 'remove) nil)))
-   ((stringp context)                   ;file or directory
-    (if (file-directory-p context)
-        (gptel-context--add-directory context 'remove)
+   ((stringp context)                   ;file, directory, or MCP resource
+    (cond
+     ((string-prefix-p "mcp://" context)
+      ;; MCP resource
       (setf (alist-get context gptel-context--alist nil 'remove #'equal) nil)
-      (message "File \"%s\" removed from context." context)))
+      (message "MCP resource \"%s\" removed from context." context))
+     ((file-directory-p context)
+      (gptel-context--add-directory context 'remove))
+     (t
+      ;; Regular file
+      (setf (alist-get context gptel-context--alist nil 'remove #'equal) nil)
+      (message "File \"%s\" removed from context." context))))
    ((region-active-p)
     (when-let* ((contexts (gptel-context--in-region (current-buffer)
                                                     (region-beginning)
@@ -307,7 +315,7 @@ DATA-BUF is the buffer where the request prompt is constructed."
   (if (= (car (func-arity gptel-context-string-function)) 2)
       (funcall gptel-context-string-function
                (lambda (c) (with-current-buffer data-buf
-                        (gptel-context--wrap-in-buffer c))
+                             (gptel-context--wrap-in-buffer c))
                  (funcall callback))
                (gptel-context--collect))
     (with-current-buffer data-buf
@@ -372,7 +380,7 @@ the beginning and end."
         (gptel-context--in-region buffer region-beginning region-end))
   (prog1 (with-current-buffer buffer
            (gptel-context--make-overlay region-beginning region-end advance))
-      (message "Region added to context buffer.")))
+    (message "Region added to context buffer.")))
 
 (defun gptel-context--in-region (buffer start end)
   "Return the list of context overlays in the given region, if any, in BUFFER.
@@ -393,9 +401,9 @@ START and END signify the region delimiters."
   (setq gptel-context--alist
         (cl-loop for (buf . ovs) in gptel-context--alist
                  if (buffer-live-p buf)
-                   if (cl-loop for ov in ovs when (overlay-start ov) collect ov)
-                   collect (cons buf it) into elements
-                   end
+                 if (cl-loop for ov in ovs when (overlay-start ov) collect ov)
+                 collect (cons buf it) into elements
+                 end
                  else if (and (stringp buf) (file-exists-p buf))
                  if (plist-get ovs :mime)
                  collect (cons buf ovs) into elements
@@ -404,40 +412,40 @@ START and END signify the region delimiters."
 
 (defun gptel-context--insert-buffer-string (buffer contexts)
   "Insert at point a context string from all CONTEXTS in BUFFER."
-    (let ((is-top-snippet t)
-          (previous-line 1))
-      (insert (format "In buffer `%s`:" (buffer-name buffer))
-              "\n\n```" (gptel--strip-mode-suffix (buffer-local-value
-                                                   'major-mode buffer))
-              "\n")
-      (dolist (context contexts)
-        (let* ((start (overlay-start context))
-               (end (overlay-end context))
-               content)
-          (let (lineno column)
-            (with-current-buffer buffer
-              (without-restriction
-                (setq lineno (line-number-at-pos start t)
-                      column (save-excursion (goto-char start)
-                                             (current-column))
-                      content (buffer-substring-no-properties start end))))
-            ;; We do not need to insert a line number indicator if we have two regions
-            ;; on the same line, because the previous region should have already put the
-            ;; indicator.
-            (unless (= previous-line lineno)
-              (unless (= lineno 1)
-                (unless is-top-snippet
-                  (insert "\n"))
-                (insert (format "... (Line %d)\n" lineno))))
-            (setq previous-line lineno)
-            (unless (zerop column) (insert " ..."))
-            (if is-top-snippet
-                (setq is-top-snippet nil)
-              (unless (= previous-line lineno) (insert "\n"))))
-          (insert content)))
-      (unless (>= (overlay-end (car (last contexts))) (point-max))
-        (insert "\n..."))
-      (insert "\n```")))
+  (let ((is-top-snippet t)
+        (previous-line 1))
+    (insert (format "In buffer `%s`:" (buffer-name buffer))
+            "\n\n```" (gptel--strip-mode-suffix (buffer-local-value
+                                                 'major-mode buffer))
+            "\n")
+    (dolist (context contexts)
+      (let* ((start (overlay-start context))
+             (end (overlay-end context))
+             content)
+        (let (lineno column)
+          (with-current-buffer buffer
+            (without-restriction
+              (setq lineno (line-number-at-pos start t)
+                    column (save-excursion (goto-char start)
+                                           (current-column))
+                    content (buffer-substring-no-properties start end))))
+          ;; We do not need to insert a line number indicator if we have two regions
+          ;; on the same line, because the previous region should have already put the
+          ;; indicator.
+          (unless (= previous-line lineno)
+            (unless (= lineno 1)
+              (unless is-top-snippet
+                (insert "\n"))
+              (insert (format "... (Line %d)\n" lineno))))
+          (setq previous-line lineno)
+          (unless (zerop column) (insert " ..."))
+          (if is-top-snippet
+              (setq is-top-snippet nil)
+            (unless (= previous-line lineno) (insert "\n"))))
+        (insert content)))
+    (unless (>= (overlay-end (car (last contexts))) (point-max))
+      (insert "\n..."))
+    (insert "\n```")))
 
 (defun gptel-context--string (context-alist)
   "Format the aggregated gptel context as annotated markdown fragments.
@@ -448,6 +456,8 @@ context overlays, see `gptel-context--alist'."
     (cl-loop for (buf . ovs) in context-alist
              if (bufferp buf)
              do (gptel-context--insert-buffer-string buf ovs)
+             else if (plist-get ovs :mcp-resource)
+             do (gptel--insert-mcp-resource-string buf ovs)
              else if (not (plist-get ovs :mime))
              do (gptel--insert-file-string buf) end
              do (insert "\n\n")
@@ -458,8 +468,21 @@ context overlays, see `gptel-context--alist'."
                (goto-char (point-min))
                (insert "Request context:\n\n"))
              finally return
-              (and (> (buffer-size) 0)
-                   (buffer-string)))))
+             (and (> (buffer-size) 0)
+                  (buffer-string)))))
+
+(defun gptel--insert-mcp-resource-string (resource-path resource-props)
+  "Insert at point a context string from MCP resource.
+
+RESOURCE-PATH is the MCP resource identifier.
+RESOURCE-PROPS contains the resource properties including content."
+  (let ((server-name (plist-get resource-props :server))
+        (uri (plist-get resource-props :uri))
+        (content (plist-get resource-props :content)))
+    (insert (format "From MCP resource `%s` (server: %s):" uri server-name)
+            "\n\n```\n")
+    (insert content)
+    (insert "\n```")))
 
 ;;; Major mode for context inspection buffers
 (defvar-keymap gptel-context-buffer-mode-map
@@ -497,25 +520,44 @@ context overlays, see `gptel-context--alist'."
           (if (length> contexts 0)
               (let (beg ov l1 l2)
                 (pcase-dolist (`(,buf . ,ovs) contexts)
-                  (if (bufferp buf)
-                      ;; It's a buffer with some overlay(s)
-                      (dolist (source-ov ovs)
-                        (with-current-buffer buf
-                          (setq l1 (line-number-at-pos (overlay-start source-ov))
-                                l2 (line-number-at-pos (overlay-end source-ov))))
-                        (insert (propertize (format "In buffer %s (lines %d-%d):\n\n"
-                                                    (buffer-name buf) l1 l2)
-                                            'face 'bold))
-                        (setq beg (point))
-                        (insert-buffer-substring
-                         buf (overlay-start source-ov) (overlay-end source-ov))
-                        (insert "\n")
-                        (setq ov (make-overlay beg (point)))
-                        (overlay-put ov 'gptel-context source-ov)
-                        (overlay-put ov 'gptel-overlay t)
-                        (overlay-put ov 'evaporate t)
-                        (insert "\n" (make-separator-line) "\n"))
-                    ;; BUF is a file path, not a buffer
+                  (cond
+                   ((bufferp buf)
+                    ;; It's a buffer with some overlay(s)
+                    (dolist (source-ov ovs)
+                      (with-current-buffer buf
+                        (setq l1 (line-number-at-pos (overlay-start source-ov))
+                              l2 (line-number-at-pos (overlay-end source-ov))))
+                      (insert (propertize (format "In buffer %s (lines %d-%d):\n\n"
+                                                  (buffer-name buf) l1 l2)
+                                          'face 'bold))
+                      (setq beg (point))
+                      (insert-buffer-substring
+                       buf (overlay-start source-ov) (overlay-end source-ov))
+                      (insert "\n")
+                      (setq ov (make-overlay beg (point)))
+                      (overlay-put ov 'gptel-context source-ov)
+                      (overlay-put ov 'gptel-overlay t)
+                      (overlay-put ov 'evaporate t)
+                      (insert "\n" (make-separator-line) "\n")))
+                   ;; BUF is a file path, not a buffer, or MCP resource
+                   ((plist-get ovs :mcp-resource)
+                    ;; BUF is an MCP resource
+                    (let ((server-name (plist-get ovs :server))
+                          (uri (plist-get ovs :uri))
+                          (content (plist-get ovs :content)))
+                      (insert (propertize (format "MCP resource %s (server: %s):\n\n" uri server-name)
+                                          'face 'bold))
+                      (setq beg (point))
+                      (insert content)
+                      (goto-char (point-max))
+                      (insert "\n")
+                      (setq ov (make-overlay beg (point)))
+                      (overlay-put ov 'gptel-context buf)
+                      (overlay-put ov 'gptel-overlay t)
+                      (overlay-put ov 'evaporate t)
+                      (insert "\n" (make-separator-line) "\n")))
+                   (t
+                    ;; BUF is a regular file path
                     (insert (propertize (format "In file %s:\n\n" (file-name-nondirectory buf))
                                         'face 'bold))
                     (setq beg (point))
@@ -535,14 +577,14 @@ context overlays, see `gptel-context--alist'."
                     (overlay-put ov 'gptel-overlay t)
                     (overlay-put ov 'evaporate t)
                     (insert "\n" (make-separator-line) "\n")))
-                (goto-char (point-min)))
-            (insert "There are no active gptel contexts.")))))
-    (display-buffer (current-buffer)
-                    `((display-buffer-reuse-window
-                       display-buffer-reuse-mode-window
-                       display-buffer-below-selected)
-                      (body-function . ,#'select-window)
-                      (window-height . ,#'fit-window-to-buffer)))))
+                  (goto-char (point-min)))
+                (insert "There are no active gptel contexts.")))))
+      (display-buffer (current-buffer)
+                      `((display-buffer-reuse-window
+                         display-buffer-reuse-mode-window
+                         display-buffer-below-selected)
+                        (body-function . ,#'select-window)
+                        (window-height . ,#'fit-window-to-buffer))))))
 
 (defvar gptel-context--buffer-reverse nil
   "Last direction of cursor movement in gptel context buffer.
@@ -656,4 +698,4 @@ If non-nil, indicates backward movement.")
   (gptel-context-quit))
 
 (provide 'gptel-context)
-;;; gptel-context.el ends here.
+;;; gptel-context.el ends here

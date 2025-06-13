@@ -45,8 +45,10 @@
 (declare-function mcp--status "mcp-hub")
 (declare-function mcp--tools "mcp-hub")
 (declare-function mcp--prompts "mcp-hub")
+(declare-function mcp--resources "mcp-hub")
 (declare-function mcp-get-prompt "mcp-hub")
 (declare-function mcp-make-text-tool "mcp-hub")
+(declare-function mcp-read-resource "mcp-hub")
 (defvar mcp-hub-servers)
 (defvar mcp-server-connections)
 
@@ -102,8 +104,9 @@ Call SERVER-CALLBACK after starting MCP servers."
                           (now-active (cl-remove-if-not server-active-p mcp-hub-servers)))
                       (mapc (lambda (tool) (apply #'gptel-make-tool tool)) tools)
                       (gptel-mcp--activate-tools tools)
-                      ;; Update known MCP prompts
+                      ;; Update known MCP prompts and resources
                       (gptel-mcp--update-known-prompts server-names)
+                      (gptel-mcp--update-known-resources server-names)
                       (if-let* ((failed (cl-set-difference inactive-servers now-active
                                                            :test #'equal)))
                           (progn
@@ -125,8 +128,9 @@ Call SERVER-CALLBACK after starting MCP servers."
                  add-all-tools (mapcar #'car inactive-servers))
               (funcall add-all-tools (mapcar #'car servers))))
         (message "All MCP tools are already available to gptel!")
-        ;; Still update prompts even if tools are already available
+        ;; Still update prompts and resources even if tools are already available
         (gptel-mcp--update-known-prompts)
+        (gptel-mcp--update-known-resources)
         (when (functionp server-callback) (funcall server-callback))))))
 
 (defun gptel-mcp-disconnect (&optional servers interactive)
@@ -221,6 +225,26 @@ from all connected servers if it is nil."
                    prompts))))
      server-names servers)))
 
+(defun gptel-mcp--get-resources (&optional server-names)
+  "Return resources from running MCP servers.
+
+SERVER-NAMES is a list of server names to get resources from.  Get resources
+from all connected servers if it is nil."
+  (unless server-names
+    (setq server-names (hash-table-keys mcp-server-connections)))
+  (let ((servers (mapcar (lambda (n) (gethash n mcp-server-connections))
+                         server-names)))
+    (cl-mapcan
+     (lambda (_name server)
+       (when (and server (equal (mcp--status server) 'connected))
+         (when-let* ((resources (mcp--resources server)))
+           (mapcar (lambda (resource)
+                     (list :uri (plist-get resource :uri)
+                           :name (plist-get resource :name)
+                           :description (plist-get resource :description)))
+                   resources))))
+     server-names servers)))
+
 (defun gptel-mcp--update-known-prompts (&optional server-names)
   "Update `gptel--known-mcp-prompts' with prompts from MCP servers.
 
@@ -237,6 +261,24 @@ prompts from all connected servers if it is nil."
                       (list :name (plist-get prompt :name)
                             :description (plist-get prompt :description)))
                     prompts)))))
+
+(defun gptel-mcp--update-known-resources (&optional server-names)
+  "Update `gptel--known-mcp-resources' with resources from MCP servers.
+
+SERVER-NAMES is a list of server names to update resources for.  Update
+resources from all connected servers if it is nil."
+  (unless server-names
+    (setq server-names (hash-table-keys mcp-server-connections)))
+  (dolist (server-name server-names)
+    (when-let* ((server (gethash server-name mcp-server-connections))
+                ((equal (mcp--status server) 'connected))
+                (resources (mcp--resources server)))
+      (setf (alist-get server-name gptel--known-mcp-resources nil nil #'equal)
+            (mapcar (lambda (resource)
+                      (list :uri (plist-get resource :uri)
+                            :name (plist-get resource :name)
+                            :description (plist-get resource :description)))
+                    resources)))))
 
 (defun gptel-mcp--activate-tools (&optional tools)
   "Activate TOOLS or all MCP tools in current gptel session."
@@ -306,12 +348,21 @@ prompts from all connected servers if it is nil."
     (interactive)
     (gptel-mcp-prompts))
 
+  (transient-define-suffix gptel--suffix-mcp-resources ()
+    "Manage MCP resources."
+    :key "Mr"
+    :description "Add MCP resources to context"
+    :transient t
+    (interactive)
+    (gptel-mcp-resources))
+
   (transient-remove-suffix 'gptel-tools '(0 2))
   (transient-append-suffix 'gptel-tools '(0 -1)
     [""
      (gptel--suffix-mcp-connect)
      (gptel--suffix-mcp-disconnect)
-     (gptel--suffix-mcp-prompts)]))
+     (gptel--suffix-mcp-prompts)
+     (gptel--suffix-mcp-resources)]))
 
 (defun gptel-mcp-prompts ()
   "Select and send MCP prompts via popup selection."
@@ -372,6 +423,56 @@ prompts from all connected servers if it is nil."
                 (message "Sent MCP prompt: %s from %s" prompt-name server-name))
             (message "Failed to get prompt %s from server %s" prompt-name server-name)))
       (error (message "Error sending MCP prompt: %s" (error-message-string err))))))
+
+(defun gptel-mcp-resources ()
+  "Select and add MCP resources to gptel context."
+  (interactive)
+  (if (null gptel--known-mcp-resources)
+      (message "No MCP resources available. Connect to MCP servers first.")
+    (let ((resource-choices
+           (cl-loop for (server-name . resources) in gptel--known-mcp-resources
+                    append (mapcar (lambda (resource)
+                                     (cons (format "%s: %s"
+                                                   server-name
+                                                   (plist-get resource :name))
+                                           (cons server-name
+                                                 (plist-get resource :uri))))
+                                   resources))))
+      (if (null resource-choices)
+          (message "No MCP resources available from connected servers.")
+        (let ((selections (completing-read-multiple
+                          "Select MCP resources to add to context (separate with \",\"): "
+                          resource-choices nil t)))
+          (when selections
+            (dolist (selection selections)
+              (when-let* ((choice (assoc selection resource-choices))
+                          (server-name (cadr choice))
+                          (resource-uri (cddr choice)))
+                (gptel--mcp-add-resource-to-context server-name resource-uri)))))))))
+
+(defun gptel--mcp-add-resource-to-context (server-name resource-uri)
+  "Add MCP resource from SERVER-NAME with RESOURCE-URI to gptel context."
+  (when-let* ((server (gethash server-name mcp-server-connections))
+              ((equal (mcp--status server) 'connected)))
+    (condition-case err
+        (let* ((resource-data (mcp-read-resource server resource-uri))
+               (content (when resource-data
+                          (if-let* ((contents (plist-get resource-data :contents))
+                                    (first-content (and (vectorp contents) (> (length contents) 0) (aref contents 0))))
+                              (plist-get first-content :text)
+                            ;; Fallback: try to extract any text content
+                            (or (plist-get resource-data :text)
+                                (format "%s" resource-data))))))
+          (if content
+              (let ((context-entry (list (format "mcp://%s/%s" server-name resource-uri)
+                                        :mcp-resource t
+                                        :server server-name
+                                        :uri resource-uri
+                                        :content content)))
+                (cl-pushnew context-entry gptel-context--alist :test #'equal)
+                (message "Added MCP resource: %s from %s to context" resource-uri server-name))
+            (message "Failed to get resource %s from server %s" resource-uri server-name)))
+      (error (message "Error adding MCP resource: %s" (error-message-string err))))))
 
 (provide 'gptel-integrations)
 ;;; gptel-integrations.el ends here

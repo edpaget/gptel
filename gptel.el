@@ -1720,6 +1720,22 @@ Example structure:
 
 This variable is for internal use only.")
 
+(defvar gptel--known-mcp-resources nil
+  "Alist of MCP resources arranged by server.
+
+Each entry maps an MCP server name to a list of resource
+specifications provided by that server.  Each resource spec is a
+plist containing at least :uri, :name and :description keys.
+
+This is used to track which MCP servers provide which resources.
+
+Example structure:
+ ((\"server1\" . ((:uri \"file:///path/to/file\" :name \"file1\" :description \"...\")
+                  (:uri \"https://example.com\" :name \"webpage\" :description \"...\")))
+  (\"server2\" . ((:uri \"db://table\" :name \"database\" :description \"...\"))))
+
+This variable is for internal use only.")
+
 (defun gptel-get-tool (path)
   "Find tool in gptel's tool registry at PATH.
 
