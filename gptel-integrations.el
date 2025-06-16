@@ -410,16 +410,10 @@ resources from all connected servers if it is nil."
                                     (plist-get content :text))
                                 ;; Fallback: try to extract any text content
                                 (or (plist-get prompt-data :text)
-                                    (format "%s" prompt-data)))))
-               (gptel-buffer (or (cl-find-if (lambda (buf)
-                                               (with-current-buffer buf gptel-mode))
-                                             (buffer-list))
-                                 (current-buffer))))
+                                    (format "%s" prompt-data))))))
           (if prompt-text
               (progn
-                (gptel-request prompt-text
-                  :buffer gptel-buffer
-                  :position (with-current-buffer gptel-buffer (point-max)))
+                (gptel-send prompt-text)
                 (message "Sent MCP prompt: %s from %s" prompt-name server-name))
             (message "Failed to get prompt %s from server %s" prompt-name server-name)))
       (error (message "Error sending MCP prompt: %s" (error-message-string err))))))
